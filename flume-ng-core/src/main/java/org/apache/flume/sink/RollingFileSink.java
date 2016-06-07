@@ -22,10 +22,14 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.Date;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.commons.io.filefilter.FileFilterUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.flume.Channel;
 import org.apache.flume.Context;
@@ -43,6 +47,14 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.ksyun.ks3.dto.CannedAccessControlList;
+import com.ksyun.ks3.dto.CreateBucketConfiguration;
+import com.ksyun.ks3.dto.CreateBucketConfiguration.REGION;
+import com.ksyun.ks3.http.HttpClientConfig;
+import com.ksyun.ks3.service.Ks3Client;
+import com.ksyun.ks3.service.Ks3ClientConfig;
+import com.ksyun.ks3.service.Ks3ClientConfig.PROTOCOL;
+import com.ksyun.ks3.service.request.CreateBucketRequest;
 
 public class RollingFileSink extends AbstractSink implements Configurable {
 
@@ -50,7 +62,7 @@ public class RollingFileSink extends AbstractSink implements Configurable {
       .getLogger(RollingFileSink.class);
   private static final long defaultRollInterval = 30;
   private static final int defaultBatchSize = 100;
-
+  private static final int defaultThreadSize = 3;
   
   private int batchSize = defaultBatchSize;
 
@@ -71,8 +83,22 @@ public class RollingFileSink extends AbstractSink implements Configurable {
   /** 文件完成后，将文件移动到目标位置  **/
   private String spoolCompleteDir;
   
+  private int threadSize;
+  private ExecutorService threadPool;// = Executors.newFixedThreadPool(10);
+  
+  
+  /** KS3 配置 **/
+  private String ks3AK;
+  private String ks3SK;
+  private String ks3Endpoint;
+  private Ks3Client ks3Client;
+  private int ks3Timeout;
+  private String ks3Bucket;
+  private String ks3Path;
+  
   public RollingFileSink() {
     shouldRotate = false;
+    
   }
 
   @Override
@@ -81,10 +107,55 @@ public class RollingFileSink extends AbstractSink implements Configurable {
     String pathManagerType = context.getString("sink.pathManager", "DEFAULT");
     String directory = context.getString("sink.directory");
     String rollInterval = context.getString("sink.rollInterval");
-    
-    // 读取自定义配置
     this.spoolCompleteDir = context.getString("sink.spoolCompleteDir");
-    System.out.println("-----------spoolCompleteDir:" + spoolCompleteDir +"---------------------------");
+    
+    
+    // 读取自定义配置，创建KS3实例
+    if (StringUtils.isNotBlank(spoolCompleteDir)) {
+    	String threadSize = context.getString("sink.threadSize");
+    	this.threadSize = StringUtils.isNotBlank(threadSize) ? Integer.parseInt(threadSize) : defaultThreadSize;
+    	this.ks3AK = context.getString("sink.ks3.ak"); 
+    	this.ks3SK = context.getString("sink.ks3.sk"); 
+    	this.ks3Endpoint = context.getString("sink.ks3.endpoint");
+    	this.ks3Timeout = context.getInteger("sink.ks3.timeout", 3000);
+    	this.ks3Bucket = context.getString("sink.ks3.bucket","sla-log");
+    	this.ks3Path = context.getString("sink.ks3.path","/tmp/log/");
+    	
+    	Ks3ClientConfig config = new Ks3ClientConfig();
+		// 配置参数
+		config.setEndpoint(ks3Endpoint);
+		config.setProtocol(PROTOCOL.http);
+		config.setPathStyleAccess(false);
+		
+		HttpClientConfig hConfig = new HttpClientConfig();
+		hConfig.setSocketTimeOut(ks3Timeout);
+		hConfig.setConnectionTimeOut(ks3Timeout);
+		config.setHttpClientConfig(hConfig);
+    	
+    	ks3Client = new Ks3Client(ks3AK, ks3SK,config);
+    	
+    	
+    	// 如果bucket不存在，则预先创建
+    	boolean bucketExists = ks3Client.bucketExists(ks3Bucket);
+    	if (!bucketExists) {
+    		logger.info("bucket:{} not exists,create now ~ ",ks3Bucket);
+    		CreateBucketRequest bucketRequest = new CreateBucketRequest(ks3Bucket);
+    		CreateBucketConfiguration bucketConfig = new CreateBucketConfiguration(REGION.BEIJING);
+    		bucketRequest.setConfig(bucketConfig);
+    		bucketRequest.setCannedAcl(CannedAccessControlList.Private);
+    		ks3Client.createBucket(bucketRequest);
+		}
+    	
+    	// 创建线程池
+    	threadPool = Executors.newFixedThreadPool(this.threadSize,new ThreadFactory() {
+    		int threadNo = 0;
+    		@Override
+    		public Thread newThread(Runnable r) {
+    			return new Thread(r,"Flume-Push2KS3-Thread-" + (++threadNo));
+    		}
+    	});
+    	
+	}
     
     serializerType = context.getString("sink.serializer", "TEXT");
     serializerContext =
@@ -289,9 +360,11 @@ public class RollingFileSink extends AbstractSink implements Configurable {
 	  this.outputStream = null;
 	  this.serializer = null;
 	  
+	  
 	  try {
 		  
-		  File currentFile = pathController.getCurrentFile();
+		  final File currentFile = pathController.getCurrentFile();
+		  final String spoolCompleteDirFileAndSeparator = spoolCompleteDir + File.separator;
 		  
 		  // 设置了文件写入完成目录，则将移动文件到目标地
 		  if (StringUtils.isNotBlank(spoolCompleteDir)) {
@@ -301,13 +374,38 @@ public class RollingFileSink extends AbstractSink implements Configurable {
 			}
 
 			// 将文件后缀修改成为已完成
-			String currentFileFinshName = renameFileWriting2Finsh(currentFile.getName());
+			final String currentFileFinshName = renameFileSuffix(currentFile.getName(),PathManager.FILE_STATUS_WRITE);
 			
-			currentFile.renameTo(new File(spoolCompleteDirFile + currentFileFinshName));
+			final File renameToFile = new File(spoolCompleteDirFileAndSeparator + currentFileFinshName);
 
+			logger.debug(Thread.currentThread().getName() + " 修改文件名：{} 为 {}",currentFile.getAbsolutePath(),renameToFile.getAbsolutePath());
+			
+			// wirting 2 write
+			currentFile.renameTo(renameToFile);
+					
+			threadPool.execute(new Runnable() {
+				public void run() {
+					
+					File targetFile = new File(spoolCompleteDirFileAndSeparator + renameFileSuffix(renameToFile.getName(),PathManager.FILE_STATUS_TOS3ING));
+					// wirte to ks3ing
+					renameToFile.renameTo(targetFile);
+					
+					logger.debug(Thread.currentThread().getName() + " 修改文件名：{} 为 {}",renameToFile.getAbsolutePath(),targetFile.getAbsolutePath());
+					
+					// 上传文件到KS3
+					ks3Client.putObject(ks3Bucket, ks3Path + currentFileFinshName, targetFile);
+
+					// ks3ing to ks3done
+					File finalFile = new File(spoolCompleteDirFileAndSeparator + renameFileSuffix(renameToFile.getName(),PathManager.FILE_STATUS_TOS3DONE));
+					targetFile.renameTo(finalFile);
+					
+					logger.debug(Thread.currentThread().getName() + " 修改文件名：{} 为 {}",targetFile.getAbsolutePath(),finalFile.getAbsolutePath());
+				}
+			});
+			
 		  // 不移动位置，只是改个名
 		  }else{
-			  currentFile.renameTo(new File(renameFileWriting2Finsh(currentFile.getAbsolutePath())));
+			  currentFile.renameTo(new File(renameFileSuffix(currentFile.getAbsolutePath(),PathManager.FILE_STATUS_WRITE)));
 		  }
 	  } catch (Exception e) {
 		  e.printStackTrace();
@@ -322,8 +420,13 @@ public class RollingFileSink extends AbstractSink implements Configurable {
    * @param fileName
    * @return
    */
-  private String renameFileWriting2Finsh(String fileName){
-	  return StringUtils.isNotBlank(fileName) ? fileName.replace(PathManager.FILE_STATUS_WRITING,PathManager.FILE_STATUS_FINSH) : StringUtils.EMPTY;
+  private String renameFileSuffix(String fileName,String newStatus){
+	  String result = StringUtils.EMPTY;
+	  if (StringUtils.isNotBlank(fileName)) {
+		  int lastIndexOfPoint = fileName.lastIndexOf(".");
+		  result = fileName.substring(0,lastIndexOfPoint) + newStatus;
+	  }
+	  return result;
   }
   
   public File getDirectory() {

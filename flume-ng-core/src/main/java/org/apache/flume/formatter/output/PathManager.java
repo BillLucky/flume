@@ -30,7 +30,13 @@ public interface PathManager {
 	public static final String FILE_STATUS_WRITING = ".writing";
 
 	/** 文件读写状态：写入完成 **/
-	public static final String FILE_STATUS_FINSH = ".finsh";
+	public static final String FILE_STATUS_WRITE = ".write";
+
+	/** 文件读写状态：写入S3中 **/
+	public static final String FILE_STATUS_TOS3ING = ".tos3_ing";
+	
+	/** 文件读写状态：写入S3完成 **/
+	public static final String FILE_STATUS_TOS3DONE = ".tos3_done";
 
 	/**
 	 * {@link Context} prefix
