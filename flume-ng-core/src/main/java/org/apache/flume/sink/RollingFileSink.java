@@ -26,6 +26,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.flume.Channel;
 import org.apache.flume.Context;
 import org.apache.flume.Event;
@@ -35,13 +36,13 @@ import org.apache.flume.conf.Configurable;
 import org.apache.flume.formatter.output.PathManager;
 import org.apache.flume.formatter.output.PathManagerFactory;
 import org.apache.flume.instrumentation.SinkCounter;
+import org.apache.flume.serialization.EventSerializer;
+import org.apache.flume.serialization.EventSerializerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import org.apache.flume.serialization.EventSerializer;
-import org.apache.flume.serialization.EventSerializerFactory;
 
 public class RollingFileSink extends AbstractSink implements Configurable {
 
@@ -50,6 +51,7 @@ public class RollingFileSink extends AbstractSink implements Configurable {
   private static final long defaultRollInterval = 30;
   private static final int defaultBatchSize = 100;
 
+  
   private int batchSize = defaultBatchSize;
 
   private File directory;
@@ -66,6 +68,9 @@ public class RollingFileSink extends AbstractSink implements Configurable {
   private PathManager pathController;
   private volatile boolean shouldRotate;
 
+  /** 文件完成后，将文件移动到目标位置  **/
+  private String spoolCompleteDir;
+  
   public RollingFileSink() {
     shouldRotate = false;
   }
@@ -76,7 +81,11 @@ public class RollingFileSink extends AbstractSink implements Configurable {
     String pathManagerType = context.getString("sink.pathManager", "DEFAULT");
     String directory = context.getString("sink.directory");
     String rollInterval = context.getString("sink.rollInterval");
-
+    
+    // 读取自定义配置
+    this.spoolCompleteDir = context.getString("sink.spoolCompleteDir");
+    System.out.println("-----------spoolCompleteDir:" + spoolCompleteDir +"---------------------------");
+    
     serializerType = context.getString("sink.serializer", "TEXT");
     serializerContext =
         new Context(context.getSubProperties("sink." +
@@ -161,8 +170,9 @@ public class RollingFileSink extends AbstractSink implements Configurable {
           throw new EventDeliveryException("Unable to rotate file "
               + pathController.getCurrentFile() + " while delivering event", e);
         } finally {
-          serializer = null;
-          outputStream = null;
+        	relaseResourceAndChangeCurrentFileName();
+          /*serializer = null;
+          outputStream = null;*/
         }
         pathController.rotate();
       }
@@ -247,8 +257,9 @@ public class RollingFileSink extends AbstractSink implements Configurable {
         sinkCounter.incrementConnectionFailedCount();
         logger.error("Unable to close output stream. Exception follows.", e);
       } finally {
-        outputStream = null;
-        serializer = null;
+    	  relaseResourceAndChangeCurrentFileName();
+        /*outputStream = null;
+        serializer = null;*/
       }
     }
     if(rollInterval > 0){
@@ -269,6 +280,52 @@ public class RollingFileSink extends AbstractSink implements Configurable {
         getName(), sinkCounter);
   }
 
+  /**
+   * 释放outputStream,serializer。 并将当前写的文件后缀修改
+   * @author LiBiao - Bill
+   * @since V1.0 2016年6月6日 - 下午8:13:10
+   */
+  private void relaseResourceAndChangeCurrentFileName(){
+	  this.outputStream = null;
+	  this.serializer = null;
+	  
+	  try {
+		  
+		  File currentFile = pathController.getCurrentFile();
+		  
+		  // 设置了文件写入完成目录，则将移动文件到目标地
+		  if (StringUtils.isNotBlank(spoolCompleteDir)) {
+			File spoolCompleteDirFile = new File(spoolCompleteDir);
+			if (!spoolCompleteDirFile.exists()) {
+				spoolCompleteDirFile.mkdirs();
+			}
+
+			// 将文件后缀修改成为已完成
+			String currentFileFinshName = renameFileWriting2Finsh(currentFile.getName());
+			
+			currentFile.renameTo(new File(spoolCompleteDirFile + currentFileFinshName));
+
+		  // 不移动位置，只是改个名
+		  }else{
+			  currentFile.renameTo(new File(renameFileWriting2Finsh(currentFile.getAbsolutePath())));
+		  }
+	  } catch (Exception e) {
+		  e.printStackTrace();
+	  }
+  }
+  
+  
+  /**
+   * 将文件名切换至已完成
+   * @author LiBiao - Bill
+   * @since V1.0 2016年6月7日 - 上午11:49:47
+   * @param fileName
+   * @return
+   */
+  private String renameFileWriting2Finsh(String fileName){
+	  return StringUtils.isNotBlank(fileName) ? fileName.replace(PathManager.FILE_STATUS_WRITING,PathManager.FILE_STATUS_FINSH) : StringUtils.EMPTY;
+  }
+  
   public File getDirectory() {
     return directory;
   }

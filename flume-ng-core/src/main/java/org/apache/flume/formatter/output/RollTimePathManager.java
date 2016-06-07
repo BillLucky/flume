@@ -38,6 +38,10 @@ public class RollTimePathManager extends DefaultPathManager {
         super(context);
     }
 
+    
+    /**
+     * 修改文件在写的时候，带上后缀.writing
+     */
     @Override
     public File nextFile() {
         StringBuilder sb = new StringBuilder();
@@ -51,6 +55,9 @@ public class RollTimePathManager extends DefaultPathManager {
         if (getExtension().length() > 0) {
             sb.append(".").append(getExtension());
         }
+        
+        // 拼接writing 
+        sb.append(FILE_STATUS_WRITING);
         currentFile = new File(getBaseDirectory(), sb.toString());
 
         return currentFile;

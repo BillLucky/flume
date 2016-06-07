@@ -25,26 +25,33 @@ import org.apache.flume.Context;
  * Creates the files used by the RollingFileSink.
  */
 public interface PathManager {
-    /**
-     * {@link Context} prefix
-     */
-    public static String CTX_PREFIX = "pathManager.";
 
-    File nextFile();
+	/** 文件读写状态：写入中 **/
+	public static final String FILE_STATUS_WRITING = ".writing";
 
-    File getCurrentFile();
+	/** 文件读写状态：写入完成 **/
+	public static final String FILE_STATUS_FINSH = ".finsh";
 
-    void rotate();
+	/**
+	 * {@link Context} prefix
+	 */
+	public static String CTX_PREFIX = "pathManager.";
 
-    File getBaseDirectory();
+	File nextFile();
 
-    void setBaseDirectory(File baseDirectory);
+	File getCurrentFile();
 
-    /**
-     * Knows how to construct this path manager.<br/>
-     * <b>Note: Implementations MUST provide a public a no-arg constructor.</b>
-     */
-    public interface Builder {
-        public PathManager build(Context context);
-    }
+	void rotate();
+
+	File getBaseDirectory();
+
+	void setBaseDirectory(File baseDirectory);
+
+	/**
+	 * Knows how to construct this path manager.<br/>
+	 * <b>Note: Implementations MUST provide a public a no-arg constructor.</b>
+	 */
+	public interface Builder {
+		public PathManager build(Context context);
+	}
 }

@@ -21,6 +21,7 @@ package org.apache.flume.formatter.output;
 
 import java.io.File;
 import java.util.concurrent.atomic.AtomicInteger;
+
 import org.apache.flume.Context;
 
 public class DefaultPathManager implements PathManager {
@@ -53,8 +54,10 @@ public class DefaultPathManager implements PathManager {
     if (extension.length() > 0) {
         sb.append(".").append(extension);
     }
+    
+    // 拼接writing 
+    sb.append(FILE_STATUS_WRITING);
     currentFile = new File(baseDirectory, sb.toString());
-
     return currentFile;
   }
 
